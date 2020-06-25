@@ -30,7 +30,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-/*==================[inlcusiones]============================================*/
+/*==================[inclusiones]============================================*/
 
 // Includes de FreeRTOS
 #include "FreeRTOS.h"
@@ -54,22 +54,53 @@ DEBUG_PRINT_ENABLE;
 
 /*==================[declaraciones de funciones internas]====================*/
 
+// C++ version 0.4 char* style "itoa":
+// Written by Lukás Chmela
+// Released under GPLv3.
+
+char* itoa(int value, char* result, int base) {
+   // check that the base if valid
+   if (base < 2 || base > 36) { *result = '\0'; return result; }
+
+   char* ptr = result, *ptr1 = result, tmp_char;
+   int tmp_value;
+
+   do {
+      tmp_value = value;
+      value /= base;
+      *ptr++ = "zyxwvutsrqponmlkjihgfedcba9876543210123456789abcdefghijklmnopqrstuvwxyz" [35 + (tmp_value - value * base)];
+   } while ( value );
+
+   // Apply negative sign
+   if (tmp_value < 0) *ptr++ = '-';
+   *ptr-- = '\0';
+   while(ptr1 < ptr) {
+      tmp_char = *ptr;
+      *ptr--= *ptr1;
+      *ptr1++ = tmp_char;
+   }
+   return result;
+}
+
 /*==================[declaraciones de funciones externas]====================*/
 
 // Prototipo de funcion de la tarea
 void tarea_lcd( void* pvParameters);
 void tarea_tem(void * pvParameters);
+void tarea_hum(void * pvParameters);
 static void tarea_led(void* pvParameters);
 uint16_t leer_temperatura();
+uint16_t leer_humedad();
+//float leer_temperatura();
 
 QueueHandle_t queue_datos;
+QueueHandle_t queue_hum;
 
 /*==================[funcion principal]======================================*/
 
 // FUNCION PRINCIPAL, PUNTO DE ENTRADA AL PROGRAMA LUEGO DE ENCENDIDO O RESET.
 int main( void )
 {
-	//printf("Universidad de Buenos Aires\n");
 
     // ---------- CONFIGURACIONES ------------------------------
     // Inicializar y configurar la plataforma
@@ -78,7 +109,7 @@ int main( void )
     // UART for debug messages
     debugPrintConfigUart( UART_USB, 115200 );
 
-    debugPrintlnString( "Trabajo Final Protocolos de Comunicación en SE\n" );
+    debugPrintlnString( "Trabajo Final RTOS / Protocolos de Comunicación en SE\n" );
     
     // Inicializacion de AnalogIO
     adcConfig(ADC_ENABLE); // ADC
@@ -89,7 +120,10 @@ int main( void )
     if (queue_datos == NULL) {
         debugPrintlnString("La cola no puede ser creada");
     }
-    
+    queue_hum = xQueueCreate(5, sizeof(uint16_t));
+    if (queue_hum == NULL) {
+        debugPrintlnString("La cola no puede ser creada");
+    }
 
     // Crear tareas en freeRTOS
     
@@ -115,6 +149,17 @@ int main( void )
         0                          		// Puntero a la tarea creada en el sistema, se puede usar NULL
     );
     
+    // Creacion de la tarea que realiza lectura de humedad
+    xTaskCreate(
+        tarea_hum,                    	 // Funcion de la tarea a ejecutar
+        //( const char * )
+		"TAREA HUMEDAD",   			// Nombre de la tarea como String amigable para el usuario
+        configMINIMAL_STACK_SIZE*2, 	// Cantidad de stack de la tarea, se puede usar tambien 200
+        0,                          	// Parametros de tarea, se puede usar NULL
+        tskIDLE_PRIORITY+1,         	// Prioridad de la tarea -> Queremos que este un nivel encima de IDLE, se puede usar 1
+        0                          		// Puntero a la tarea creada en el sistema, se puede usar NULL
+    );
+
     // Creacion de la tarea que mantiene un led indicador de funcionamiento
     xTaskCreate(
         tarea_led,                     // Funcion de la tarea a ejecutar
@@ -155,6 +200,7 @@ void tarea_tem(void * pvParameters) {
     
     // ---------- CONFIGURACIONES ------------------------------
     uint16_t temperatura_actual;
+    //float temperatura_actual;
 
     // ---------- REPETIR POR SIEMPRE --------------------------
     while(1) {
@@ -164,6 +210,23 @@ void tarea_tem(void * pvParameters) {
     }
 }
 
+//-----------------------------------------------------------
+//---------------------- H U M ------------------------------
+//-----------------------------------------------------------
+// Implementacion de funcion de la tarea
+void tarea_hum(void * pvParameters) {
+
+    // ---------- CONFIGURACIONES ------------------------------
+    uint16_t humedad_actual;
+    //float temperatura_actual;
+
+    // ---------- REPETIR POR SIEMPRE --------------------------
+    while(1) {
+        humedad_actual = leer_humedad();
+        xQueueSend(queue_hum, &humedad_actual, portMAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
 
 //-----------------------------------------------------------
 //------------------------ L C D ----------------------------
@@ -173,11 +236,12 @@ void tarea_lcd( void* pvParameters)
 {
     // ---------- CONFIGURACIONES ------------------------------
     uint16_t temperatura;
-    char buffer[20];
+    uint16_t humedad;
+    //float temperatura;
+    //char buffer[20];
+    static char buffer[20];
 
-    i2cInit(I2C0, 100000); 	// Esta inicialización tambien la probé en main(), no se donde deberia
-    						// estar, en la red vi ejemplos similares pero no pude determinar donde
-    						// debe estar
+    i2cInit(I2C0, 100000); 	// Inicialización del protocolo
     
     // Inicializar LCD de 16x2 (caracteres x lineas) con cada caracter de 5x2 pixeles
     lcdInit(16, 2, 5, 8);
@@ -191,13 +255,31 @@ void tarea_lcd( void* pvParameters)
         if (xQueueReceive(queue_datos, &temperatura, portMAX_DELAY) == pdPASS) {
         	lcdClear();
             lcdGoToXY(0, 0); // Poner cursor en 0, 0
-        	sprintf(buffer,"%d",temperatura);
+            lcdSendStringRaw("Tem: ");
+        	//sprintf(buffer,"%3.2f",temperatura);
+            lcdGoToXY(0, 7);
+            itoa( temperatura, buffer, 10 );
             lcdSendStringRaw(buffer);
             //lcdSendStringRaw("hola");
             vPrintStringAndNumber("Temperatura = ", temperatura);
         }
             else{
-            	vPrintStringAndNumber("nada che \r\n ", temperatura);
+            	vPrintStringAndNumber("No hay datos para mostrar \r\n ", temperatura);
+
+        }
+        if (xQueueReceive(queue_hum, &humedad, portMAX_DELAY) == pdPASS) {
+        	//lcdClear();
+            lcdGoToXY(0, 1); // Poner cursor en 0, 0
+            lcdSendStringRaw("Hum: ");
+        	//sprintf(buffer,"%3.2f",temperatura);
+            lcdGoToXY(1, 7);
+            itoa( humedad, buffer, 10 );
+            lcdSendStringRaw(buffer);
+            //lcdSendStringRaw("hola");
+            vPrintStringAndNumber("Temperatura = ", temperatura);
+        }
+            else{
+            	vPrintStringAndNumber("No hay datos para mostrar \r\n ", temperatura);
 
         }
     }
@@ -209,20 +291,20 @@ void tarea_lcd( void* pvParameters)
 //------------------------ L E D ----------------------------
 //-----------------------------------------------------------
 // Tarea de led testigo o indicador de funcionamiento
-static void tarea_led(void* pvParameters)
+static void tarea_led( void * pvParameters )
 {
-    // ---------- CONFIGURACIONES ------------------------------
-    
-    // ---------- REPETIR POR SIEMPRE --------------------------
-    while (1)
+// Blink cada 200ms.
+// Función extraida y adaptada de https://www.freertos.org/a00127.html
+const TickType_t xDelay = 200 / portTICK_PERIOD_MS;
+
+    for( ;; )
     {
-        /* Prendo el led azul */
-       gpioWrite( LEDB, ON );
-        vTaskDelay(200/portTICK_PERIOD_MS);
-        
-        /* Apago el led azul */
-        gpioWrite( LEDB, OFF );
-        vTaskDelay(200/portTICK_PERIOD_MS);
+    	// Prendo el led azul
+    	gpioWrite( LEDB, ON );
+    	vTaskDelay( xDelay );
+    	// Apago el led azul
+    	gpioWrite( LEDB, OFF );
+        vTaskDelay( xDelay );
     }
 }
 
@@ -234,12 +316,25 @@ uint16_t leer_temperatura() {
     
     // Variable para almacenar el valor leido del ADC CH1
     uint16_t data;
-    
+
     // Leo la Entrada Analogica AI0 - ADC0 CH1
     data = adcRead(CH1);
     
     return data;
 }
 
+//-----------------------------------------------------------
+//---------------- S E N S O R    H U M ---------------------
+//-----------------------------------------------------------
+// Funcion para la lectura del sensor de temperatura
+uint16_t leer_humedad() {
 
+    // Variable para almacenar el valor leido del ADC CH2
+    uint16_t data;
+
+    // Leo la Entrada Analogica AI0 - ADC0 CH2
+    data = adcRead(CH2);
+
+    return data;
+}
 /*==================[fin del archivo]========================================*/
